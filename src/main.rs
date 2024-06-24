@@ -10,17 +10,15 @@ const FOV: f32 = 90.0;
 const NUM_OF_RAYS: usize = 430;
 const FAR_CLIPING_PLANE: f32 = 10.0;
 
-#[derive(Clone, Copy)]
 enum Cell {
     EMPTY,
-    WALL,
     COLOR(Color)
 }
 
 struct Board {
     rows: usize,
     cols: usize,
-    cells: Vec<Cell>
+    cells: Vec<&'static Cell>
 }
 
 struct Player {
@@ -46,31 +44,21 @@ struct Straight {
     dir: Vector2
 }
 
-impl Cell {
-    fn color(&self) -> Color {
-        match self {
-            Cell::EMPTY => Color::GRAY,
-            Cell::WALL => Color::BLUE,
-            Cell::COLOR(color) => *color,
-        }
-    }
-}
-
 impl Board {
     fn new(rows: usize, cols: usize) -> Board {
         Board {
             rows, cols,
-            cells: vec![Cell::EMPTY; rows * cols]
+            cells: vec![&Cell::EMPTY; rows * cols]
         }
     }
 
-    fn at(&self, x: usize, y: usize) -> Cell {
+    fn at(&self, x: usize, y: usize) -> &Cell {
         assert!(x < self.cols, "X out of bounds");
         assert!(y < self.rows, "Y out of bounds");
         self.cells[y * self.cols + x]
     }
 
-    fn set(&mut self, x: usize, y: usize, cell: Cell) {
+    fn set(&mut self, x: usize, y: usize, cell: &'static Cell) {
         assert!(x < self.cols, "X out of bounds");
         assert!(y < self.rows, "Y out of bounds");
         self.cells[y * self.cols + x] = cell
@@ -199,8 +187,8 @@ fn cast_ray(start: Vector2, dir: Vector2, board: &Board) -> Vector2 {
     point
 }
 
-fn get_hitted_cells(game: &Game) -> [(Cell, f32); NUM_OF_RAYS] {
-    let mut cells = [(Cell::EMPTY, 0.0); NUM_OF_RAYS];
+fn get_hitted_cells(game: &Game) -> [(&Cell, Vector2); NUM_OF_RAYS] {
+    let mut cells = [(&Cell::EMPTY, Vector2::zero()); NUM_OF_RAYS];
 
     let half_fov = (FOV/2.0) * std::f32::consts::PI / 180.0;
     let start = game.player.dir.rotated(half_fov);
@@ -210,7 +198,7 @@ fn get_hitted_cells(game: &Game) -> [(Cell, f32); NUM_OF_RAYS] {
     let mut dir = start;
     for cell in cells.iter_mut() {
         let point = cast_ray(game.player.pos, dir, &game.board);
-        cell.1 = point.sub(game.player.pos).dot(game.player.dir);
+        cell.1 = point;
 
         if point.x >= 0.0 && point.x < game.board.cols as f32 && point.y >= 0.0 && point.y < game.board.rows  as f32{
 
@@ -227,7 +215,7 @@ fn get_hitted_cells(game: &Game) -> [(Cell, f32); NUM_OF_RAYS] {
     cells
 }
 
-fn darken_color(color: Color, dist: f32) -> Color {
+fn darken_color(color: &Color, dist: f32) -> Color {
     let hsv = color.color_to_hsv();
     Color::color_from_hsv(hsv.x, hsv.y, hsv.z * (1.0 - dist))
 }
@@ -259,13 +247,6 @@ fn minimap_mouse_event(d: &mut RaylibDrawHandle, mt: &Transform2D, game: &mut Ga
 
     if mouse.x >= 0.0 && mouse.y >= 0.0 && mouse.x < game.board.cols as f32 && mouse.y < game.board.rows as f32 {
         if d.is_mouse_button_pressed(raylib::ffi::MouseButton::MOUSE_BUTTON_LEFT) {
-            match game.board.at(x, y) {
-                Cell::EMPTY => game.board.set(x, y, Cell::WALL),
-                _ => game.board.set(x, y, Cell::EMPTY)
-            }
-        }
-
-        if d.is_mouse_button_pressed(raylib::ffi::MouseButton::MOUSE_BUTTON_RIGHT) {
             game.player.pos = Vector2::new(x as f32 + 0.5, y as f32 + 0.5);
         }
     }
@@ -273,21 +254,24 @@ fn minimap_mouse_event(d: &mut RaylibDrawHandle, mt: &Transform2D, game: &mut Ga
 
 fn render_game(d: &mut RaylibDrawHandle, game: &Game) {
     let hitted_cells = get_hitted_cells(&game);
-    let stripe_width = WINDOW_SIZE.x / NUM_OF_RAYS as f32;
+    let strip_width = WINDOW_SIZE.x / NUM_OF_RAYS as f32;
     let max_dist = Vector2::new(game.board.cols as f32, game.board.rows as f32).length();
 
     let mut x = 0.0;
     for cell in hitted_cells.iter().rev() {
+        let dist = cell.1.sub(game.player.pos).dot(game.player.dir);
+
         match cell.0 {
             Cell::EMPTY => {},
-            _ => {
-                let h = WINDOW_SIZE.y / cell.1 / ((WINDOW_SIZE.y / WINDOW_SIZE.x)*2.0);
+            Cell::COLOR(color) => {
+                let h = WINDOW_SIZE.y / dist / ((WINDOW_SIZE.y / WINDOW_SIZE.x)*2.0);
                 let y = (WINDOW_SIZE.y - h) / 2.0;
-                let color = darken_color(cell.0.color(), cell.1 / max_dist);
-                d.draw_rectangle_v(Vector2::new(x, y), Vector2::new(stripe_width, h), color);
+
+                let color = darken_color(color, dist / max_dist);
+                d.draw_rectangle_v(Vector2::new(x, y), Vector2::new(strip_width, h), color);
             }
         }
-        x += stripe_width;
+        x += strip_width;
     }
 }
 
@@ -323,12 +307,11 @@ fn render_minimap(d: &mut RaylibDrawHandle, mt: &Transform2D,  game: &Game) {
 
             let pos = Vector2::new(x as f32, y as f32).apply(&mt);
             let size = Vector2::one().apply_zoom(&mt);
-            let color = cell.color();
 
             match cell {
                 Cell::EMPTY => {},
-                _ => d.draw_rectangle_v(pos, size, color),
-           }
+                Cell::COLOR(color) => d.draw_rectangle_v(pos, size, color),
+            }
         }
     }
 
@@ -356,10 +339,10 @@ fn main() {
     let board = Board::new(10, 10);
     let player = Player::new(0.0, 0.0);
     let mut game = Game { board, player };
-    game.board.set(5, 5, Cell::WALL);
-    game.board.set(5, 6, Cell::COLOR(Color::YELLOW));
-    game.board.set(5, 4, Cell::COLOR(Color::RED));
-    game.board.set(4, 3, Cell::COLOR(Color::GREEN));
+    game.board.set(5, 5, &Cell::COLOR(Color::BLUE));
+    game.board.set(5, 6, &Cell::COLOR(Color::YELLOW));
+    game.board.set(5, 4, &Cell::COLOR(Color::RED));
+    game.board.set(4, 3, &Cell::COLOR(Color::GREEN));
     game.player.spd.mul_assign(3.0);
     game.player.turn_spd *= 2.0;
 
