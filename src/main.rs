@@ -14,7 +14,8 @@ const FAR_CLIPING_PLANE: f32 = 10.0;
 enum Cell {
     EMPTY,
     COLOR(Color),
-    TEXTURE(Texture2D)
+    TEXTURE(Texture2D),
+    TranslucentTexture(Texture2D)
 }
 
 struct Board<'a> {
@@ -177,11 +178,12 @@ fn next_ray_step(current: Vector2, straight: &Straight) -> Vector2 {
     Vector2::new(x, y)
 }
 
-fn cast_ray(start: Vector2, dir: Vector2, board: &Board) -> Vector2 {
+fn cast_ray(start: Vector2, dir: Vector2, board: &Board) -> Vec<Vector2> {
     let straight = Straight::new(start, start.add(dir));
     let eps = Vector2::new(f32::signum(straight.dir.x) * EPS, f32::signum(straight.dir.y) * EPS);
 
     let mut point = next_ray_step(start, &straight);
+    let mut points: Vec<Vector2> = vec![];
 
     let mut dist = point.distance_to(start).powi(2);
     let mut last_dist = dist - 1.0;
@@ -197,7 +199,13 @@ fn cast_ray(start: Vector2, dir: Vector2, board: &Board) -> Vector2 {
         let y = f32::max(f32::min(y, board.rows as f32 - 1.0), 0.0) as usize;
         match board.at(x, y) {
             Cell::EMPTY => {},
-            _ => break,
+            Cell::TranslucentTexture(_) => {
+                points.push(point)
+            },
+            _ => {
+                points.push(point);
+                break
+            },
         }
 
         point = next_ray_step(point.add(eps), &straight);
@@ -206,11 +214,11 @@ fn cast_ray(start: Vector2, dir: Vector2, board: &Board) -> Vector2 {
         dist = point.distance_to(start).powi(2);
     }
 
-    point
+    points
 }
 
-fn get_hitted_cells<'a>(game: &'a Game) -> [(&'a Cell, Vector2); NUM_OF_RAYS] {
-    let mut cells = [(&Cell::EMPTY, Vector2::zero()); NUM_OF_RAYS];
+fn get_hitted_cells<'a>(game: &'a Game) -> [Vec<(&'a Cell, Vector2)>; NUM_OF_RAYS] {
+    let mut all_cells = [(); NUM_OF_RAYS].map(|_| vec![(&Cell::EMPTY, Vector2::zero())]);
 
     let half_fov = (FOV/2.0) * std::f32::consts::PI / 180.0;
     let start = game.player.dir.rotated(half_fov);
@@ -218,23 +226,28 @@ fn get_hitted_cells<'a>(game: &'a Game) -> [(&'a Cell, Vector2); NUM_OF_RAYS] {
     let lerp_amount = end.sub(start).div(NUM_OF_RAYS as f32);
 
     let mut dir = start;
-    for cell in cells.iter_mut() {
-        let point = cast_ray(game.player.pos, dir, &game.board);
-        cell.1 = point;
+    for cells in all_cells.iter_mut() {
+        let points = cast_ray(game.player.pos, dir, &game.board);
+        for point in points.iter() {
+            let mut cell = (&Cell::EMPTY, Vector2::zero());
+            cell.1 = *point;
 
-        if point.x >= 0.0 && point.x < game.board.cols as f32 && point.y >= 0.0 && point.y < game.board.rows  as f32{
+            if point.x >= 0.0 && point.x < game.board.cols as f32 && point.y >= 0.0 && point.y < game.board.rows  as f32{
 
-            let x = if dir.x > 0.0 { f32::floor(point.x) }
-            else { f32::ceil(point.x) - 1.0 } as usize;
-            let y = if dir.y > 0.0 { f32::floor(point.y) }
-            else { f32::ceil(point.y) - 1.0} as usize;
-            cell.0 = game.board.at(x, y);
+                let x = if dir.x > 0.0 { f32::floor(point.x) }
+                else { f32::ceil(point.x) - 1.0 } as usize;
+                let y = if dir.y > 0.0 { f32::floor(point.y) }
+                else { f32::ceil(point.y) - 1.0} as usize;
+                cell.0 = game.board.at(x, y);
+            }
+
+            cells.push(cell);
         }
 
         dir.add_assign(lerp_amount);
     }
 
-    cells
+    all_cells
 }
 
 fn darken_color(color: &Color, dist: f32) -> Color {
@@ -282,76 +295,47 @@ fn render_game(d: &mut RaylibDrawHandle, game: &Game) {
     let max_dist = Vector2::new(game.board.cols as f32, game.board.rows as f32).length();
     let hitted_cells = get_hitted_cells(game);
 
-    for (x, cell) in hitted_cells.iter().rev().enumerate() {
-        let dist = cell.1.sub(game.player.pos).dot(game.player.dir);
+    for (x, cells) in hitted_cells.iter().rev().enumerate() {
+        for cell in cells.iter().rev() {
+            let dist = cell.1.sub(game.player.pos).dot(game.player.dir);
 
-        let h = (window_size.y / dist) / (2.0 * window_size.y / window_size.x);
-        let pos = Vector2::new(x as f32, (window_size.y - h) / 2.0);
+            let h = (window_size.y / dist) / (2.0 * window_size.y / window_size.x);
+            let pos = Vector2::new(x as f32, (window_size.y - h) / 2.0);
 
-        match cell.0 {
-            Cell::EMPTY => {},
-            Cell::COLOR(color) => {
-                let color = darken_color(color, max_dist);
-                d.draw_rectangle_v(pos.apply(&gt), Vector2::new(1.0, h).apply_zoom(&gt), color);
-            },
-            Cell::TEXTURE(texture) => {
-                let nx = cell.1.x - f32::floor(cell.1.x);
-                let ny = cell.1.y - f32::floor(cell.1.y);
+            match cell.0 {
+                Cell::EMPTY => {},
+                Cell::COLOR(color) => {
+                    let color = darken_color(color, max_dist);
+                    d.draw_rectangle_v(pos.apply(&gt), Vector2::new(1.0, h).apply_zoom(&gt), color);
+                },
+                Cell::TranslucentTexture(texture) | Cell::TEXTURE(texture) => {
+                    let nx = cell.1.x - f32::floor(cell.1.x);
+                    let ny = cell.1.y - f32::floor(cell.1.y);
 
-                let mut tx = texture.width as f32;
-                let mut ty = texture.height as f32;
+                    let mut tx = texture.width as f32;
+                    let mut ty = texture.height as f32;
 
-                if ny ==  0.0 {
-                    tx *= nx;
-                    ty *= ny;
-                } else {
-                    tx *= ny;
-                    ty *= nx;
+                    if ny ==  0.0 {
+                        tx *= nx;
+                        ty *= ny;
+                    } else {
+                        tx *= ny;
+                        ty *= nx;
+                    }
+
+                    let th = texture.height as f32;
+                    let tw = 1.0;
+
+                    let color = darken_color(&Color::WHITE, dist/max_dist);
+
+                    let source_rec = Rectangle::new(tx, ty, tw, th);
+                    let dest_rec = Rectangle::new(pos.x, pos.y, 1.0, h).apply(&gt);
+
+                    d.draw_texture_pro(texture, source_rec, dest_rec, Vector2::zero(), 0.0, color);
                 }
-
-                let th = texture.height as f32;
-                let tw = 1.0;
-
-                let color = darken_color(&Color::WHITE, dist/max_dist);
-
-                let source_rec = Rectangle::new(tx, ty, tw, th);
-                let dest_rec = Rectangle::new(pos.x, pos.y, 1.0, h).apply(&gt);
-
-                d.draw_texture_pro(texture, source_rec, dest_rec, Vector2::zero(), 0.0, color);
-                //d.draw_rectangle_v(pos.apply(&gt), Vector2::new(1.0, h).apply_zoom(&gt), color);
-            },
+            }
         }
     }
-
-    //let hitted_cells = get_hitted_cells(&game);
-    //let strip_width = WINDOW_SIZE.x / NUM_OF_RAYS as f32;
-    //let max_dist = Vector2::new(game.board.cols as f32, game.board.rows as f32).length();
-
-    //let mut x = 0.0;
-    //for cell in hitted_cells.iter().rev() {
-    //    let dist = cell.1.sub(game.player.pos).dot(game.player.dir);
-
-    //    let h = WINDOW_SIZE.y / dist / ((WINDOW_SIZE.y / WINDOW_SIZE.x)*2.0);
-    //    let y = (WINDOW_SIZE.y - h) / 2.0;
-
-    //    match cell.0 {
-    //        Cell::EMPTY => {},
-    //        Cell::COLOR(color) => {
-    //            let color = darken_color(color, dist / max_dist);
-    //            d.draw_rectangle_v(Vector2::new(x, y), Vector2::new(strip_width, h), color);
-    //        },
-    //        Cell::TEXTURE(texture) => {
-    //            let scale = WINDOW_SIZE.div(Vector2::new(texture.width as f32, texture.height as f32));
-
-    //            let source_rec = Rectangle::new(x * scale.x, y * scale.y, strip_width * scale.x, h * scale.y);
-
-    //            let dest_rec = Rectangle::new(x, y, strip_width, h);
-    //            let color = darken_color(&Color::WHITE, dist / max_dist);
-    //            d.draw_texture_pro(texture, source_rec, dest_rec, Vector2::zero(), 0.0, color);
-    //        }
-    //    }
-    //    x += strip_width;
-    //}
 }
 
 fn render_player(d: &mut RaylibDrawHandle, mt: &Transform2D, player: &Player) {
@@ -390,7 +374,7 @@ fn render_minimap(d: &mut RaylibDrawHandle, mt: &Transform2D,  game: &Game) {
             match cell {
                 Cell::EMPTY => {},
                 Cell::COLOR(color) => d.draw_rectangle_v(pos, size, color),
-                Cell::TEXTURE(texture) => {
+                Cell::TranslucentTexture(texture) | Cell::TEXTURE(texture) => {
                     let source_rec =Rectangle::new(0.0, 0.0, texture.width as f32, texture.height as f32);
                     let dest_rec = Rectangle::new(x as f32, y as f32, 1.0, 1.0).apply(&mt);
                     d.draw_texture_pro(texture, source_rec, dest_rec, Vector2::zero(), 0.0, Color::WHITE);
@@ -414,16 +398,14 @@ fn calulate_minimap_size(board_size: Vector2) -> Vector2 {
     }
 }
 
-fn load_texture(rl: &mut RaylibHandle, thread: &RaylibThread, filename: &str) -> Cell {
-    let texture = match rl.load_texture(&thread, filename) {
+fn load_texture(rl: &mut RaylibHandle, thread: &RaylibThread, filename: &str) -> Texture2D {
+    match rl.load_texture(&thread, filename) {
         Ok(texture) => texture,
         Err(err) => {
             println!("ERROR: {}", err);
             exit(1);
         },
-    };
-
-    Cell::TEXTURE(texture)
+    }
 }
 
 fn main() {
@@ -446,10 +428,11 @@ fn main() {
     mt.zoom = minimap_size.div(board_size);
     mt.offset = WINDOW_SIZE.sub(minimap_size).sub(margin);
 
-    let galo_cego = load_texture(&mut rl, &thread, "./res/galo-cego.png");
-    let atumalaca = load_texture(&mut rl, &thread, "./res/atumalaca.png");
-    let steve_body = load_texture(&mut rl, &thread, "./res/steve-body.png");
-    let steve_face = load_texture(&mut rl, &thread, "./res/steve-face.png");
+    let galo_cego = Cell::TEXTURE(load_texture(&mut rl, &thread, "./res/galo-cego.png"));
+    let atumalaca = Cell::TEXTURE(load_texture(&mut rl, &thread, "./res/atumalaca.png"));
+    let steve_face = Cell::TEXTURE(load_texture(&mut rl, &thread, "./res/steve-face.png"));
+    let steve_body = Cell::TranslucentTexture(load_texture(&mut rl, &thread, "./res/steve-body.png"));
+    let glass = Cell::TranslucentTexture(load_texture(&mut rl, &thread, "./res/glass.png"));
 
     game.board.set(5, 5, &Cell::COLOR(Color::BLUE));
     game.board.set(5, 6, &Cell::COLOR(Color::YELLOW));
@@ -457,9 +440,10 @@ fn main() {
     game.board.set(4, 3, &Cell::COLOR(Color::GREEN));
 
     game.board.set(1, 7, &galo_cego);
-    game.board.set(2, 7, &steve_body);
     game.board.set(3, 7, &atumalaca);
     game.board.set(4, 7, &steve_face);
+    game.board.set(2, 7, &steve_body);
+    game.board.set(4, 4, &glass);
 
 
     while !rl.window_should_close() {
